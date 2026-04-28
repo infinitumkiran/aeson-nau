@@ -7,6 +7,12 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RecursiveDo #-}
+
+#if __GLASGOW_HASKELL__ >= 806
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE StandaloneDeriving #-}
+#endif
 
 -- For Data.Aeson.Types.camelTo
 {-# OPTIONS_GHC -fno-warn-deprecations #-}
@@ -25,9 +31,9 @@ module UnitTests
 import Prelude.Compat
 
 import Control.Applicative (Const)
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Data.Aeson ((.=), (.:), (.:?), (.:!), FromJSON(..), FromJSONKeyFunction(..), FromJSONKey(..), ToJSON1(..), decode, eitherDecode, encode, fromJSON, genericParseJSON, genericToEncoding, genericToJSON, object, withObject, withEmbeddedJSON)
-import Data.Aeson.Internal (JSONPathElement(..), formatError)
+import Data.Aeson.Types (JSONPathElement(..), formatError)
 import Data.Aeson.QQ.Simple (aesonQQ)
 import Data.Aeson.TH (deriveJSON, deriveToJSON, deriveToJSON1)
 import Data.Aeson.Text (encodeToTextBuilder)
@@ -37,13 +43,15 @@ import Data.Aeson.Parser
 import Data.Aeson.Types
   ( Options(..), Result(Success, Error), ToJSON(..)
   , Value(Array, Bool, Null, Number, Object, String), camelTo, camelTo2
-  , defaultOptions, formatPath, formatRelativePath, omitNothingFields, parse)
+  , explicitParseField, liftParseJSON, listParser
+  , defaultOptions, formatPath, formatRelativePath, omitNothingFields, parse, parseMaybe)
+import qualified Data.Aeson.Types
+import qualified Data.Aeson.KeyMap as KM
 import Data.Attoparsec.ByteString (Parser, parseOnly)
-import Data.Char (toUpper)
-import Data.Either.Compat (isLeft, isRight)
+import Data.Char (toUpper, GeneralCategory(Control,Surrogate), generalCategory)
 import Data.Hashable (hash)
 import Data.HashMap.Strict (HashMap)
-import Data.List (sort, isSuffixOf)
+import Data.List (isSuffixOf)
 import Data.Maybe (fromMaybe)
 import Data.Scientific (Scientific, scientific)
 import Data.Tagged (Tagged(..))
@@ -51,19 +59,16 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 import Data.Time.Format.Compat (parseTimeM, defaultTimeLocale)
 import GHC.Generics (Generic)
+import GHC.Generics.Generically (Generically (..))
 import Instances ()
 import Numeric.Natural (Natural)
-import System.Directory (getDirectoryContents)
-import System.FilePath ((</>), takeExtension, takeFileName)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (Assertion, assertBool, assertFailure, assertEqual, testCase, (@?=))
+import Test.Tasty.HUnit (Assertion, assertFailure, assertEqual, testCase, (@?=))
 import Text.Printf (printf)
 import UnitTests.NullaryConstructors (nullaryConstructors)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Base16.Lazy as LBase16
 import qualified Data.ByteString.Lazy.Char8 as L
-import qualified Data.HashSet as HashSet
-import qualified Data.HashMap.Lazy as HashMap
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.Builder as TLB
 import qualified Data.Text.Lazy.Encoding as LT
@@ -71,12 +76,8 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.Vector as Vector
 import qualified ErrorMessages
 import qualified SerializationFormatSpec
-
--- Asserts that we can use both modules at once in the test suite.
-import Data.Aeson.Parser.UnescapeFFI ()
-import Data.Aeson.Parser.UnescapePure ()
-
-
+import qualified Data.Map as Map -- Lazy!
+import Regression.Issue967
 
 roundTripCamel :: String -> Assertion
 roundTripCamel name = assertEqual "" name (camelFrom '_' $ camelTo '_' name)
@@ -99,9 +100,13 @@ data Wibble = Wibble {
 
 instance FromJSON Wibble
 
+#if __GLASGOW_HASKELL__ >= 806
+deriving via Generically Wibble instance ToJSON Wibble
+#else
 instance ToJSON Wibble where
     toJSON     = genericToJSON defaultOptions
     toEncoding = genericToEncoding defaultOptions
+#endif
 
 -- Test that if we put a bomb in a data structure, but only demand
 -- part of it via lazy encoding, we do not unexpectedly fail.
@@ -386,10 +391,14 @@ unescapeString = do
      (Right ("\" / \\ \b \f \n \r \t" :: String))
      (eitherDecode "\"\\\" \\/ \\\\ \\b \\f \\n \\r \\t\"")
 
-  forM_ [minBound .. maxBound :: Char] $ \ c ->
-    let s = LT.pack [c] in
-    assertEqual (printf "UTF-16 encoded '\\x%X'" c)
-      (Right s) (eitherDecode $ utf16Char s)
+  forM_ [minBound .. maxBound :: Char] $ \ c -> do
+    let s = LT.pack [c]
+
+    assertEqual (printf "UTF-16 encoded '\\x%X'" c) (Right s) (eitherDecode $ utf16Char s)
+
+    when (notEscapeControlOrSurrogate c) $
+        assertEqual (printf "UTF-8 encode '\\x%X'" c) (Right s) (eitherDecode $ utf8Char s)
+
   where
     utf16Char = formatString . LBase16.encode . LT.encodeUtf16BE
     formatString s
@@ -398,72 +407,16 @@ unescapeString = do
           L.concat ["\"\\u", L.take 4 s, "\\u", L.drop 4 s, "\""]
       | otherwise = error "unescapeString: can't happen"
 
--- JSONTestSuite
+    utf8Char s = L.concat ["\"", LT.encodeUtf8 s, "\""]
 
-jsonTestSuiteTest :: FilePath -> TestTree
-jsonTestSuiteTest path = testCase fileName $ do
-    payload <- L.readFile path
-    let result = eitherDecode payload :: Either String Value
-    assertBool fileName $ case take 2 fileName of
-      "i_" -> isRight result
-      "n_" -> isLeft result
-      "y_" -> isRight result
-      _    -> isRight result -- test_transform tests have inconsistent names
-  where
-    fileName = takeFileName path
+    notEscapeControlOrSurrogate '"'  = False
+    notEscapeControlOrSurrogate '\\' = False
+    notEscapeControlOrSurrogate c = case generalCategory c of
+      Control -> False
+      Surrogate -> False
+      _ -> True
 
--- Build a collection of tests based on the current contents of the
--- JSONTestSuite test directories.
 
-jsonTestSuite :: IO TestTree
-jsonTestSuite = do
-  let suitePath = "tests/JSONTestSuite"
-  let suites = ["test_parsing", "test_transform"]
-  testPaths <- fmap (sort . concat) . forM suites $ \suite -> do
-    let dir = suitePath </> suite
-    entries <- getDirectoryContents dir
-    let ok name = takeExtension name == ".json" &&
-                  not (name `HashSet.member` blacklist)
-    return . map (dir </>) . filter ok $ entries
-  return $ testGroup "JSONTestSuite" $ map jsonTestSuiteTest testPaths
-
--- The set expected-to-be-failing JSONTestSuite tests.
--- Not all of these failures are genuine bugs.
--- Of those that are bugs, not all are worth fixing.
-
-blacklist :: HashSet.HashSet String
--- blacklist = HashSet.empty
-blacklist = _blacklist
-
-_blacklist :: HashSet.HashSet String
-_blacklist = HashSet.fromList [
-    "i_object_key_lone_2nd_surrogate.json"
-  , "i_string_1st_surrogate_but_2nd_missing.json"
-  , "i_string_1st_valid_surrogate_2nd_invalid.json"
-  , "i_string_UTF-16LE_with_BOM.json"
-  , "i_string_UTF-16_invalid_lonely_surrogate.json"
-  , "i_string_UTF-16_invalid_surrogate.json"
-  , "i_string_UTF-8_invalid_sequence.json"
-  , "i_string_incomplete_surrogate_and_escape_valid.json"
-  , "i_string_incomplete_surrogate_pair.json"
-  , "i_string_incomplete_surrogates_escape_valid.json"
-  , "i_string_invalid_lonely_surrogate.json"
-  , "i_string_invalid_surrogate.json"
-  , "i_string_inverted_surrogates_U+1D11E.json"
-  , "i_string_lone_second_surrogate.json"
-  , "i_string_not_in_unicode_range.json"
-  , "i_string_truncated-utf-8.json"
-  , "i_structure_UTF-8_BOM_empty_object.json"
-  , "string_1_escaped_invalid_codepoint.json"
-  , "string_1_invalid_codepoint.json"
-  , "string_1_invalid_codepoints.json"
-  , "string_2_escaped_invalid_codepoints.json"
-  , "string_2_invalid_codepoints.json"
-  , "string_3_escaped_invalid_codepoints.json"
-  , "string_3_invalid_codepoints.json"
-  , "y_string_utf16BE_no_BOM.json"
-  , "y_string_utf16LE_no_BOM.json"
-  ]
 
 -- A regression test for: https://github.com/bos/aeson/pull/455
 data Foo a = FooNil | FooCons (Foo Int)
@@ -624,26 +577,26 @@ keyOrdering :: [TestTree]
 keyOrdering =
   [ testParser "json" json
       "{\"k\":true,\"k\":false}" $
-      Right (Object (HashMap.fromList [("k", Bool True)]))
+      Right (Object (KM.fromList [("k", Bool True)]))
   , testParser "jsonLast" jsonLast
       "{\"k\":true,\"k\":false}" $
-      Right (Object (HashMap.fromList [("k", Bool False)]))
+      Right (Object (KM.fromList [("k", Bool False)]))
   , testParser "jsonAccum" jsonAccum
       "{\"k\":true,\"k\":false}" $
-      Right (Object (HashMap.fromList [("k", Array (Vector.fromList [Bool True, Bool False]))]))
+      Right (Object (KM.fromList [("k", Array (Vector.fromList [Bool True, Bool False]))]))
   , testParser "jsonNoDup" jsonNoDup
       "{\"k\":true,\"k\":false}" $
       Left "Failed reading: found duplicate key: \"k\""
 
   , testParser "json'" json'
       "{\"k\":true,\"k\":false}" $
-      Right (Object (HashMap.fromList [("k", Bool True)]))
+      Right (Object (KM.fromList [("k", Bool True)]))
   , testParser "jsonLast'" jsonLast'
       "{\"k\":true,\"k\":false}" $
-      Right (Object (HashMap.fromList [("k", Bool False)]))
+      Right (Object (KM.fromList [("k", Bool False)]))
   , testParser "jsonAccum'" jsonAccum'
       "{\"k\":true,\"k\":false}" $
-      Right (Object (HashMap.fromList [("k", Array (Vector.fromList [Bool True, Bool False]))]))
+      Right (Object (KM.fromList [("k", Array (Vector.fromList [Bool True, Bool False]))]))
   , testParser "jsonNoDup'" jsonNoDup'
       "{\"k\":true,\"k\":false}" $
       Left "Failed reading: found duplicate key: \"k\""
@@ -711,14 +664,113 @@ newtype Newtype757 a = MkNewtype757 (Fam757 a)
 deriveToJSON1 defaultOptions ''Newtype757
 
 -------------------------------------------------------------------------------
+-- MonadFix
+-------------------------------------------------------------------------------
+
+monadFixDecoding1 :: (Value -> Data.Aeson.Types.Parser [Char]) -> Assertion
+monadFixDecoding1 p = do
+    fmap (take 10) (parseMaybe p value) @?= Just "xyzxyzxyzx"
+  where
+    value = object
+        [ "foo" .= ('x', "bar" :: String)
+        , "bar" .= ('y', "quu" :: String)
+        , "quu" .= ('z', "foo" :: String)
+        ]
+
+monadFixDecoding2 :: (Value -> Data.Aeson.Types.Parser [Char]) -> Assertion
+monadFixDecoding2 p = do
+    fmap (take 10) (parseMaybe p value) @?= Nothing
+  where
+    value = object
+        [ "foo" .= ('x', "bar" :: String)
+        , "bar" .= ('y', "???" :: String)
+        , "quu" .= ('z', "foo" :: String)
+        ]
+
+monadFixDecoding3 :: (Value -> Data.Aeson.Types.Parser [Char]) -> Assertion
+monadFixDecoding3 p =
+    fmap (take 10) (parseMaybe p value) @?= Nothing
+  where
+    value = object
+        [ "foo" .= ('x', "bar" :: String)
+        , "bar" .= Null
+        , "quu" .= ('z', "foo" :: String)
+        ]
+
+monadFixDecoding4 :: (Value -> Data.Aeson.Types.Parser [Char]) -> Assertion
+monadFixDecoding4 p =
+    fmap (take 10) (parseMaybe p value) @?= Nothing
+  where
+    value = object
+        [ "els" .= ('x', "bar" :: String)
+        , "bar" .= Null
+        , "quu" .= ('z', "foo" :: String)
+        ]
+
+-- Parser with explicit references
+monadFixParserA :: Value -> Data.Aeson.Types.Parser [Char]
+monadFixParserA = withObject "Rec" $ \obj -> mdo
+    let p'' :: Value -> Data.Aeson.Types.Parser String
+        p'' "foo" = return foo
+        p'' "bar" = return bar
+        p'' "quu" = return quu
+        p'' _     = fail "Invalid reference"
+
+    let p' :: Value -> Data.Aeson.Types.Parser [Char]
+        p' v = do
+            (c, cs) <- liftParseJSON p'' (listParser p'') v
+            return (c : cs)
+
+    foo <- explicitParseField p' obj "foo"
+    bar <- explicitParseField p' obj "bar"
+    quu <- explicitParseField p' obj "quu"
+    return foo
+
+-- Parser with arbitrary references!
+monadFixParserB :: Value -> Data.Aeson.Types.Parser [Char]
+monadFixParserB = withObject "Rec" $ \obj -> mdo
+    let p'' :: Value -> Data.Aeson.Types.Parser String
+        p'' key' = do
+            key <- parseJSON key'
+            -- this is ugly: we look whether key is in original obj
+            -- but then query from refs.
+            --
+            -- This way we are lazier. Map.traverse isn't lazy enough.
+            case KM.lookup key obj of
+                Just _  -> return (refs Map.! key)
+                Nothing -> fail "Invalid reference"
+
+    let p' :: Value -> Data.Aeson.Types.Parser [Char]
+        p' v = do
+            (c, cs) <- liftParseJSON p'' (listParser p'') v
+            return (c : cs)
+
+    refs <- traverse p' (KM.toMap obj)
+    case Map.lookup "foo" refs of
+        Nothing   -> fail "No foo node"
+        Just root -> return root
+
+monadFixTests :: TestTree
+monadFixTests = testGroup "MonadFix"
+    [ testCase "Example1a" $ monadFixDecoding1 monadFixParserA
+    , testCase "Example2a" $ monadFixDecoding2 monadFixParserA
+    , testCase "Example3a" $ monadFixDecoding3 monadFixParserA
+    , testCase "Example4a" $ monadFixDecoding4 monadFixParserA
+
+    , testCase "Example1b" $ monadFixDecoding1 monadFixParserB
+    , testCase "Example2b" $ monadFixDecoding2 monadFixParserB
+    , testCase "Example3b" $ monadFixDecoding3 monadFixParserB
+    , testCase "Example4b" $ monadFixDecoding4 monadFixParserB
+    ]
+
+-------------------------------------------------------------------------------
 -- Tests trees
 -------------------------------------------------------------------------------
 
 ioTests :: IO [TestTree]
 ioTests = do
   enc <- encoderComparisonTests
-  js <- jsonTestSuite
-  return [enc, js]
+  return [enc]
 
 tests :: TestTree
 tests = testGroup "unit" [
@@ -766,10 +818,17 @@ tests = testGroup "unit" [
   , testCase "Small rational"           smallRationalDecoding
   , testCase "Big scientific exponent" bigScientificExponent
   , testCase "Big integer decoding" bigIntegerDecoding
-  , testCase "Big natural decading" bigNaturalDecoding
+  , testCase "Big natural decoding" bigNaturalDecoding
   , testCase "Big integer key decoding" bigIntegerKeyDecoding
   , testGroup "QQ.Simple"
     [ testCase "example" $
       assertEqual "" (object ["foo" .= True]) [aesonQQ| {"foo": true } |]
     ]
+  , monadFixTests
+  , issue967
+  , testCase "KeyMap.insertWith" $ do
+      KM.insertWith (-)        "a" 2 (KM.fromList [("a", 1)]) @?= KM.fromList [("a",1 :: Int)]
+      KM.insertWith (flip (-)) "a" 2 (KM.fromList [("a", 1)]) @?= KM.fromList [("a",-1 :: Int)]
+      KM.insertWith (-)        "b" 2 (KM.fromList [("a", 1)]) @?= KM.fromList [("a",1),("b",2 :: Int)]
+      KM.insertWith (-)        "b" 2 KM.empty                 @?= KM.fromList [("b",2 :: Int)]
   ]

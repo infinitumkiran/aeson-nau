@@ -41,20 +41,25 @@ module Data.Aeson.Encoding.Builder
 import Prelude.Compat
 
 import Data.Aeson.Internal.Time
-import Data.Aeson.Types.Internal (Value (..))
-import Data.ByteString.Builder as B
-import Data.ByteString.Builder.Prim as BP
+import Data.ByteString.Builder.Scientific (formatScientificBuilder, FPFormat(..))
+import Data.Attoparsec.Time.Internal
+import Data.Aeson.Types.Internal (Value (..), Key)
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
+import Data.ByteString.Builder (Builder)
+import qualified Data.ByteString.Builder as B
+import Data.ByteString.Builder.Prim ((>$<), (>*<))
+import qualified Data.ByteString.Builder.Prim as BP
 import Data.ByteString.Builder.Scientific (scientificBuilder)
 import Data.Char (chr, ord)
-import Data.Scientific (Scientific, base10Exponent, coefficient)
+import Data.Scientific (Scientific, isInteger, base10Exponent)
 import Data.Text.Encoding (encodeUtf8BuilderEscaped)
 import Data.Time (UTCTime(..))
 import Data.Time.Calendar (Day(..), toGregorian)
 import Data.Time.Calendar.Month.Compat (Month, toYearMonth)
 import Data.Time.Calendar.Quarter.Compat (Quarter, toYearQuarter, QuarterOfYear (..))
-import Data.Time.LocalTime
+import Data.Time.LocalTime (LocalTime (..), TimeZone (..), ZonedTime (..), TimeOfDay (..))
 import Data.Word (Word8)
-import qualified Data.HashMap.Strict as HMS
 import qualified Data.Text as T
 import qualified Data.Vector as V
 
@@ -90,13 +95,17 @@ array v
     withComma a z = B.char8 ',' <> encodeToBuilder a <> z
 
 -- Encode a JSON object.
-object :: HMS.HashMap T.Text Value -> Builder
-object m = case HMS.toList m of
+object :: KM.KeyMap Value -> Builder
+object m = case KM.toList m of
     (x:xs) -> B.char8 '{' <> one x <> foldr withComma (B.char8 '}') xs
     _      -> emptyObject_
   where
     withComma a z = B.char8 ',' <> one a <> z
-    one (k,v)     = text k <> B.char8 ':' <> encodeToBuilder v
+    one (k,v)     = key k <> B.char8 ':' <> encodeToBuilder v
+
+-- | Encode a JSON key.
+key :: Key -> Builder
+key = text . Key.toText
 
 -- | Encode a JSON string.
 text :: T.Text -> Builder
@@ -136,8 +145,8 @@ c2w c = fromIntegral (ord c)
 -- | Encode a JSON number.
 scientific :: Scientific -> Builder
 scientific s
-    | e < 0 || e > 1024 = scientificBuilder s
-    | otherwise = B.integerDec (coefficient s * 10 ^ e)
+    | e < -1024 || e > 1024 = scientificBuilder s
+    | otherwise = formatScientificBuilder Fixed (if isInteger s then Just 0 else Nothing) s
   where
     e = base10Exponent s
 

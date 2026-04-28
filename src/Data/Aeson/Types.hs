@@ -14,6 +14,7 @@ module Data.Aeson.Types
     (
     -- * Core JSON types
       Value(..)
+    , Key
     , Encoding
     , unsafeToEncoding
     , fromEncoding
@@ -28,6 +29,7 @@ module Data.Aeson.Types
     , typeMismatch
     , unexpected
     -- * Type conversion
+    -- ** Parsing
     , Parser
     , Result(..)
     , FromJSON(..)
@@ -36,17 +38,25 @@ module Data.Aeson.Types
     , parseEither
     , parseMaybe
     , parseFail
-    , ToJSON(..)
-    , KeyValue(..)
+    -- ** Parser error handling
     , modifyFailure
     , prependFailure
     , parserThrowError
     , parserCatchError
+    -- ** Parsing with paths
+    , IResult (..)
+    , ifromJSON
+    , iparse
+    , iparseEither
+    -- ** Encoding
+    , ToJSON(..)
+    , KeyValue(..)
 
     -- ** Keys for maps
     , ToJSONKey(..)
     , ToJSONKeyFunction(..)
     , toJSONKeyText
+    , toJSONKeyKey
     , contramapToJSONKeyFunction
     , FromJSONKey(..)
     , FromJSONKeyFunction(..)
@@ -146,6 +156,7 @@ module Data.Aeson.Types
     , JSONPathElement(..)
     , formatPath
     , formatRelativePath
+    , formatError
     ) where
 
 import Prelude.Compat

@@ -1,12 +1,86 @@
 For the latest version of this document, please see [https://github.com/haskell/aeson/blob/master/changelog.md](https://github.com/haskell/aeson/blob/master/changelog.md).
 
-### 1.6.0.0
+### 2.1.3.0
+
+* Changed Show/Read instance for ErrorResp to give out json string and read json string back to ErrorResp
+
+### 2.1.2.1
+
+* Support `th-abstraction-0.5`
+
+### 2.1.2.0
+
+* Add `throwDecode :: (MonadThrow m, FromJSON a) => ByteString -> m a`
+  and variants.
+* Add `Data.Aeson.Decoding` which uses new underlying tokenizer / parser.
+  This parser seems to be faster, and the intermediate `Tokens` streams
+  allow to differentiate more than `Value` if needed.
+  If no critical issues is found, this parser will become the default
+  in next major `aeson` version.
+* Support deriving for empty datatypes (such as `Void` and `V1`)
+  in `FromJSON` and `ToJSON`.
+* Add `To/FromJSONKey Void` instances
+* Fix `FromJSONKey Double` handling of infinities
+
+### 2.1.1.0
+
+- Add `Data.Aeson.KeyMap.!?` (flipped) alias to `Data.Aeson.KeyMap.lookup`.
+- Add `Data.Aeson.KeyMap.insertWith` function.
+- Use `unsafeDupablePerformIO` instead of incorrect `accursedUnutterablePerformIO` in creation of keys in TH serialisation.
+  This fixes a bug in TH deriving, e.g. when `Strict` pragma was enabled.
+
+### 2.1.0.0
+
+- Change time instances of types with year (`Day`, `UTCTime`) to require years with at least 4 digits.
+- Change `KeyValue` instances to be more general (and use equality to constraint them) instead of being more lax flexible instances.
+- Export `Key` type also from `Data.Aeson.KeyMap` module.
+- Export `mapWithKey` from `Data.Aeson.KeyMap` module.
+- Export `ifromJSON` and `iparse` from `Data.Aeson.Types`. Add `iparseEither`.
+- Add `MonadFix Parser` instance.
+- Make `Semigroup Series` slightly lazier
+- Add instances for `Generically` type
+
+### 2.0.3.0
+
+* `text-2.0` support
+* `bytestring-0.11.2.0` support
+* Rewrite pure text literal unescaper.
+* Add `QuickCheck`'s `Arbitrary`, `CoArbitrary` and `Function` instances
+
+### 2.0.2.0
+
+* Add `IsList (KeyMap v)` instance.
+* Add `toMapText` and `fromMapText` to `Data.Aeson.KeyMap`.
+* Add `ShortText` instances
+* Add `Solo` instances
+
+### 2.0.1.0
+
+* Add `FromJSON KeyMap` instance.
+* Make `ordered-keymap` on by default.
+
+### 2.0.0.0
 
 * Remove forced `-O2` and then unneeded `fast` flag.
   Also remove most of `INLINE` pragmas.
   In the effect, `aeson` compiles almost twice as fast.
 
   To get `fast` compilation effect cabal-install users may specify `optimization: False`.
+
+* Make map type used by Object abstract so the underlying implementation can
+  be modified, thanks to Callan McGill
+
+* Add `ordered-keymap` flag allowing to change the underlying implementation of object `KeyMap`.
+
+* Drop GHC-7 support
+
+* Remove Data.Aeson.Encode module
+
+* `Double` and `Float` infinities are encoded as `"+inf"` and `"-inf"`.
+  Change `To/FromJSONKey` instances to use `"+inf"` and `"-inf"` too.
+
+* `FromJSON ()` and `FromJSON (Proxy tag)` accept any JSON value.
+
 
 ### 1.5.6.0
 * Make `Show Value` instance print object keys in lexicographic order.

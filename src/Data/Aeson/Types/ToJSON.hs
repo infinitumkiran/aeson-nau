@@ -1,9 +1,11 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -13,9 +15,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-
-#include "overlapping-compat.h"
-#include "incoherent-compat.h"
 
 -- TODO: Drop this when we remove support for Data.Attoparsec.Number
 {-# OPTIONS_GHC -fno-warn-deprecations #-}
@@ -42,6 +41,7 @@ module Data.Aeson.Types.ToJSON
     , ToJSONKey(..)
     , ToJSONKeyFunction(..)
     , toJSONKeyText
+    , toJSONKeyKey
     , contramapToJSONKeyFunction
 
     , GToJSONKey()
@@ -63,11 +63,14 @@ import Control.Applicative (Const(..))
 import Control.Monad.ST (ST)
 import Data.Aeson.Encoding (Encoding, Encoding', Series, dict, emptyArray_)
 import Data.Aeson.Encoding.Internal ((>*<))
-import Data.Aeson.Internal.Functions (mapHashKeyVal, mapKeyVal)
+import Data.Aeson.Internal.Functions (mapKeyVal, mapKeyValO)
 import Data.Aeson.Types.Generic (AllNullary, False, IsRecord, One, ProductSize, Tagged2(..), True, Zero, productSize)
 import Data.Aeson.Types.Internal
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
 import Data.Attoparsec.Number (Number(..))
 import Data.Bits (unsafeShiftR)
+import Data.Coerce (coerce)
 import Data.DList (DList)
 import Data.Fixed (Fixed, HasResolution, Nano)
 import Data.Foldable (toList)
@@ -93,6 +96,7 @@ import Data.Time.Calendar.Compat (CalendarDiffDays (..), DayOfWeek (..))
 import Data.Time.LocalTime.Compat (CalendarDiffTime (..))
 import Data.Time.Clock.System.Compat (SystemTime (..))
 import Data.Time.Format.Compat (FormatTime, formatTime, defaultTimeLocale)
+import Data.Tuple.Solo (Solo (..), getSolo)
 import Data.Vector (Vector)
 import Data.Version (Version, showVersion)
 import Data.Void (Void, absurd)
@@ -100,12 +104,15 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Storable (Storable)
 import Foreign.C.Types (CTime (..))
 import GHC.Generics
+#if !MIN_VERSION_base(4,17,0)
+import GHC.Generics.Generically (Generically (..), Generically1 (..))
+#endif
 import Numeric.Natural (Natural)
 import qualified Data.Aeson.Encoding as E
-import qualified Data.Aeson.Encoding.Internal as E (InArray, comma, econcat, retagEncoding)
+import qualified Data.Aeson.Encoding.Internal as E (InArray, comma, econcat, retagEncoding, key)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.DList as DList
-#if MIN_VERSION_dlist(1,0,0) && __GLASGOW_HASKELL__ >=800
+#if MIN_VERSION_dlist(1,0,0)
 import qualified Data.DList.DNonEmpty as DNE
 #endif
 import qualified Data.Fix as F
@@ -124,6 +131,7 @@ import qualified Data.Strict as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Lazy as LT
+import qualified Data.Text.Short as ST
 import qualified Data.Tree as Tree
 import qualified Data.UUID.Types as UUID
 import qualified Data.Vector as V
@@ -147,8 +155,9 @@ toJSONPair a b = liftToJSON2 a (listValue a) b (listValue b)
 
 realFloatToJSON :: RealFloat a => a -> Value
 realFloatToJSON d
-    | isNaN d || isInfinite d = Null
-    | otherwise = Number $ Scientific.fromFloatDigits d
+    | isNaN d      = Null
+    | isInfinite d = if d > 0 then "+inf" else "-inf"
+    | otherwise    = Number $ Scientific.fromFloatDigits d
 
 -------------------------------------------------------------------------------
 -- Generics
@@ -253,6 +262,12 @@ genericLiftToEncoding opts te tel = gToJSON opts (To1Args te tel) . from1
 --     'toEncoding' = 'genericToEncoding' 'defaultOptions'
 -- @
 --
+-- or more conveniently using the [DerivingVia extension](https://downloads.haskell.org/ghc/9.2.3/docs/html/users_guide/exts/deriving_via.html)
+--
+-- @
+-- deriving via 'Generically' Coord instance 'ToJSON' Coord
+-- @
+--
 -- If on the other hand you wish to customize the generic decoding, you have
 -- to implement both methods:
 --
@@ -269,7 +284,7 @@ genericLiftToEncoding opts te tel = gToJSON opts (To1Args te tel) . from1
 -- Previous versions of this library only had the 'toJSON' method. Adding
 -- 'toEncoding' had two reasons:
 --
--- 1. toEncoding is more efficient for the common case that the output of
+-- 1. 'toEncoding' is more efficient for the common case that the output of
 -- 'toJSON' is directly serialized to a @ByteString@.
 -- Further, expressing either method in terms of the other would be
 -- non-optimal.
@@ -318,28 +333,33 @@ class ToJSON a where
     toEncodingList :: [a] -> Encoding
     toEncodingList = listEncoding toEncoding
 
+-- | @since 2.1.0.0
+instance (Generic a, GToJSON' Value Zero (Rep a), GToJSON' Encoding Zero (Rep a)) => ToJSON (Generically a) where
+    toJSON     = coerce (genericToJSON     defaultOptions :: a -> Value)
+    toEncoding = coerce (genericToEncoding defaultOptions :: a -> Encoding)
+
 -------------------------------------------------------------------------------
 -- Object key-value pairs
 -------------------------------------------------------------------------------
 
 -- | A key-value pair for encoding a JSON object.
 class KeyValue kv where
-    (.=) :: ToJSON v => Text -> v -> kv
+    (.=) :: ToJSON v => Key -> v -> kv
     infixr 8 .=
 
 instance KeyValue Series where
     name .= value = E.pair name (toEncoding value)
     {-# INLINE (.=) #-}
 
-instance KeyValue Pair where
+instance (key ~ Key, value ~ Value) => KeyValue (key, value) where
     name .= value = (name, toJSON value)
     {-# INLINE (.=) #-}
 
--- | Constructs a singleton 'H.HashMap'. For calling functions that
+-- | Constructs a singleton 'KM.KeyMap'. For calling functions that
 --   demand an 'Object' for constructing objects. To be used in
 --   conjunction with 'mconcat'. Prefer to use 'object' where possible.
-instance KeyValue Object where
-    name .= value = H.singleton name (toJSON value)
+instance value ~ Value => KeyValue (KM.KeyMap value) where
+    name .= value = KM.singleton name (toJSON value)
     {-# INLINE (.=) #-}
 
 -------------------------------------------------------------------------------
@@ -477,7 +497,7 @@ class ToJSONKey a where
     toJSONKeyList = ToJSONKeyValue toJSON toEncoding
 
 data ToJSONKeyFunction a
-    = ToJSONKeyText !(a -> Text) !(a -> Encoding' Text)
+    = ToJSONKeyText !(a -> Key) !(a -> Encoding' Key)
       -- ^ key is encoded to string, produces object
     | ToJSONKeyValue !(a -> Value) !(a -> Encoding)
       -- ^ key is encoded to value, produces array
@@ -491,14 +511,21 @@ data ToJSONKeyFunction a
 --         myKeyToText = Text.pack . show -- or showt from text-show
 -- @
 toJSONKeyText :: (a -> Text) -> ToJSONKeyFunction a
-toJSONKeyText f = ToJSONKeyText f (E.text . f)
+toJSONKeyText f = toJSONKeyKey (Key.fromText . f)
+
+-- |
+--
+-- @since 2.0.0.0
+toJSONKeyKey :: (a -> Key) -> ToJSONKeyFunction a
+toJSONKeyKey f = ToJSONKeyText f (E.key . f)
 
 -- | TODO: should this be exported?
-toJSONKeyTextEnc :: (a -> Encoding' Text) -> ToJSONKeyFunction a
+toJSONKeyTextEnc :: (a -> Encoding' Key) -> ToJSONKeyFunction a
 toJSONKeyTextEnc e = ToJSONKeyText tot e
  where
     -- TODO: dropAround is also used in stringEncoding, which is unfortunate atm
-    tot = T.dropAround (== '"')
+    tot = Key.fromText
+        . T.dropAround (== '"')
         . T.decodeLatin1
         . L.toStrict
         . E.encodingToLazyByteString
@@ -531,13 +558,13 @@ contramapToJSONKeyFunction h x = case x of
 -- @
 genericToJSONKey :: (Generic a, GToJSONKey (Rep a))
            => JSONKeyOptions -> ToJSONKeyFunction a
-genericToJSONKey opts = toJSONKeyText (pack . keyModifier opts . getConName . from)
+genericToJSONKey opts = toJSONKeyKey (Key.fromString . keyModifier opts . getConName . from)
 
 class    GetConName f => GToJSONKey f
 instance GetConName f => GToJSONKey f
 
 -------------------------------------------------------------------------------
--- Lifings of FromJSON and ToJSON to unary and binary type constructors
+-- Liftings of FromJSON and ToJSON to unary and binary type constructors
 -------------------------------------------------------------------------------
 
 
@@ -604,6 +631,14 @@ class ToJSON1 f where
 
     liftToEncodingList :: (a -> Encoding) -> ([a] -> Encoding) -> [f a] -> Encoding
     liftToEncodingList f g = listEncoding (liftToEncoding f g)
+
+-- | @since 2.1.0.0
+instance (Generic1 f, GToJSON' Value One (Rep1 f), GToJSON' Encoding One (Rep1 f)) => ToJSON1 (Generically1 f) where
+    liftToJSON :: forall a. (a -> Value) -> ([a] -> Value) -> Generically1 f a -> Value
+    liftToJSON = coerce (genericLiftToJSON defaultOptions :: (a -> Value) -> ([a] -> Value) -> f a -> Value)
+
+    liftToEncoding :: forall a. (a -> Encoding) -> ([a] -> Encoding) -> Generically1 f a -> Encoding
+    liftToEncoding = coerce (genericLiftToEncoding defaultOptions :: (a -> Encoding) -> ([a] -> Encoding) -> f a -> Encoding)
 
 -- | Lift the standard 'toJSON' function through the type constructor.
 toJSON1 :: (ToJSON1 f, ToJSON a) => f a -> Value
@@ -693,7 +728,7 @@ instance (ToJSON a) => ToJSON [a] where
 -- Generic toJSON / toEncoding
 -------------------------------------------------------------------------------
 
-instance OVERLAPPABLE_ (GToJSON' enc arity a) => GToJSON' enc arity (M1 i c a) where
+instance {-# OVERLAPPABLE #-} (GToJSON' enc arity a) => GToJSON' enc arity (M1 i c a) where
     -- Meta-information, which is not handled elsewhere, is ignored:
     gToJSON opts targs = gToJSON opts targs . unM1
     {-# INLINE gToJSON #-}
@@ -795,6 +830,12 @@ instance ( ToJSON1 f
 --------------------------------------------------------------------------------
 -- Generic toEncoding
 
+instance GToJSON' Encoding arity V1 where
+    -- Empty values do not exist, which makes the job of formatting them
+    -- rather easy:
+    gToJSON _ _ x = case x of {}
+    {-# INLINE gToJSON #-}
+
 instance ToJSON a => GToJSON' Encoding arity (K1 i a) where
     -- Constant values are encoded using their ToJSON instance:
     gToJSON _opts _ = toEncoding . unK1
@@ -872,7 +913,7 @@ nonAllNullarySumToJSON opts targs =
     case sumEncoding opts of
 
       TaggedObject{..}      ->
-        taggedObject opts targs tagFieldName contentsFieldName
+        taggedObject opts targs (Key.fromString tagFieldName) (Key.fromString contentsFieldName)
 
       ObjectWithSingleField ->
         (unTagged :: Tagged ObjectWithSingleField enc -> enc)
@@ -902,7 +943,7 @@ instance FromString Value where
 
 class TaggedObject enc arity f where
     taggedObject :: Options -> ToArgs enc arity a
-                 -> String -> String
+                 -> Key -> Key
                  -> f a -> enc
 
 instance ( TaggedObject enc arity a
@@ -936,7 +977,7 @@ instance ( IsRecord                      a isRecord
 
 class TaggedObject' enc pairs arity f isRecord where
     taggedObject' :: Options -> ToArgs enc arity a
-                  -> String -> f a -> Tagged isRecord pairs
+                  -> Key -> f a -> Tagged isRecord pairs
 
 instance ( GToJSON' enc arity f
          , KeyValuePair enc pairs
@@ -946,7 +987,7 @@ instance ( GToJSON' enc arity f
         Tagged . (contentsFieldName `pair`) . gToJSON opts targs
     {-# INLINE taggedObject' #-}
 
-instance OVERLAPPING_ Monoid pairs => TaggedObject' enc pairs arity U1 False where
+instance {-# OVERLAPPING #-} Monoid pairs => TaggedObject' enc pairs arity U1 False where
     taggedObject' _ _ _ _ = Tagged mempty
     {-# INLINE taggedObject' #-}
 
@@ -1044,7 +1085,7 @@ instance ( IsRecord                f isRecord
       . consToJSON' opts targs
     {-# INLINE consToJSON #-}
 
-instance OVERLAPPING_
+instance {-# OVERLAPPING #-}
          ( RecordToPairs enc pairs arity (S1 s f)
          , FromPairs enc pairs
          , GToJSON' enc arity f
@@ -1095,7 +1136,7 @@ instance ( Selector s
     recordToPairs = fieldToPair
     {-# INLINE recordToPairs #-}
 
-instance INCOHERENT_
+instance {-# INCOHERENT #-}
     ( Selector s
     , GToJSON' enc arity (K1 i (Maybe a))
     , KeyValuePair enc pairs
@@ -1107,7 +1148,8 @@ instance INCOHERENT_
     recordToPairs opts targs m1 = fieldToPair opts targs m1
     {-# INLINE recordToPairs #-}
 
-instance INCOHERENT_
+#if !MIN_VERSION_base(4,16,0)
+instance {-# INCOHERENT #-}
     ( Selector s
     , GToJSON' enc arity (K1 i (Maybe a))
     , KeyValuePair enc pairs
@@ -1119,6 +1161,7 @@ instance INCOHERENT_
         unwrap :: S1 s (K1 i (Semigroup.Option a)) p -> S1 s (K1 i (Maybe a)) p
         unwrap (M1 (K1 (Semigroup.Option a))) = M1 (K1 a)
     {-# INLINE recordToPairs #-}
+#endif
 
 fieldToPair :: (Selector s
                , GToJSON' enc arity a
@@ -1126,7 +1169,7 @@ fieldToPair :: (Selector s
             => Options -> ToArgs enc arity p
             -> S1 s a p -> pairs
 fieldToPair opts targs m1 =
-  let key   = fieldLabelModifier opts (selName m1)
+  let key   = Key.fromString $ fieldLabelModifier opts (selName m1)
       value = gToJSON opts targs (unM1 m1)
   in key `pair` value
 {-# INLINE fieldToPair #-}
@@ -1154,7 +1197,7 @@ instance ( WriteProduct arity a
           ixR  = ix  + lenL
     {-# INLINE writeProduct #-}
 
-instance OVERLAPPABLE_ (GToJSON' Value arity a) => WriteProduct arity a where
+instance {-# OVERLAPPABLE #-} (GToJSON' Value arity a) => WriteProduct arity a where
     writeProduct opts targs mv ix _ =
       VM.unsafeWrite mv ix . gToJSON opts targs
     {-# INLINE writeProduct #-}
@@ -1177,7 +1220,7 @@ instance ( EncodeProduct    arity a
       encodeProduct opts targs b
     {-# INLINE encodeProduct #-}
 
-instance OVERLAPPABLE_ (GToJSON' Encoding arity a) => EncodeProduct arity a where
+instance {-# OVERLAPPABLE #-} (GToJSON' Encoding arity a) => EncodeProduct arity a where
     encodeProduct opts targs a = E.retagEncoding $ gToJSON opts targs a
     {-# INLINE encodeProduct #-}
 
@@ -1193,20 +1236,20 @@ instance ( GToJSON'   enc arity a
     sumToJSON' opts targs =
       Tagged . fromPairs . (typ `pair`) . gToJSON opts targs
         where
-          typ = constructorTagModifier opts $
+          typ = Key.fromString $ constructorTagModifier opts $
                          conName (undefined :: t c a p)
     {-# INLINE sumToJSON' #-}
 
 --------------------------------------------------------------------------------
 
-instance OVERLAPPABLE_
+instance {-# OVERLAPPABLE #-}
     ( ConsToJSON enc arity a
     ) => SumToJSON' UntaggedValue enc arity (C1 c a)
   where
     sumToJSON' opts targs = Tagged . gToJSON opts targs
     {-# INLINE sumToJSON' #-}
 
-instance OVERLAPPING_
+instance {-# OVERLAPPING #-}
     ( Constructor c
     , FromString enc
     ) => SumToJSON' UntaggedValue enc arity (C1 c U1)
@@ -1252,8 +1295,8 @@ instance (ToJSON a) => ToJSON (Maybe a) where
 
 
 instance ToJSON2 Either where
-    liftToJSON2  toA _ _toB _ (Left a)  = Object $ H.singleton "Left"  (toA a)
-    liftToJSON2 _toA _  toB _ (Right b) = Object $ H.singleton "Right" (toB b)
+    liftToJSON2  toA _ _toB _ (Left a)  = Object $ KM.singleton "Left"  (toA a)
+    liftToJSON2 _toA _  toB _ (Right b) = Object $ KM.singleton "Right" (toB b)
 
     liftToEncoding2  toA _ _toB _ (Left a) = E.pairs $ E.pair "Left" $ toA a
     liftToEncoding2 _toA _ toB _ (Right b) = E.pairs $ E.pair "Right" $ toB b
@@ -1269,6 +1312,10 @@ instance (ToJSON a, ToJSON b) => ToJSON (Either a b) where
 instance ToJSON Void where
     toJSON = absurd
     toEncoding = absurd
+
+-- | @since 2.1.2.0
+instance ToJSONKey Void where
+    toJSONKey = ToJSONKeyText absurd absurd
 
 instance ToJSON Bool where
     toJSON = Bool
@@ -1447,13 +1494,21 @@ instance ToJSON Text where
 instance ToJSONKey Text where
     toJSONKey = toJSONKeyText id
 
-
 instance ToJSON LT.Text where
     toJSON = String . LT.toStrict
     toEncoding = E.lazyText
 
 instance ToJSONKey LT.Text where
-    toJSONKey = toJSONKeyText LT.toStrict
+    toJSONKey = toJSONKeyText (LT.toStrict)
+
+-- | @since 2.0.2.0
+instance ToJSON ST.ShortText where
+    toJSON = String . ST.toText
+    toEncoding = E.shortText
+
+-- | @since 2.0.2.0
+instance ToJSONKey ST.ShortText where
+    toJSONKey = ToJSONKeyText Key.fromShortText E.shortText
 
 
 instance ToJSON Version where
@@ -1461,7 +1516,7 @@ instance ToJSON Version where
     toEncoding = toEncoding . showVersion
 
 instance ToJSONKey Version where
-    toJSONKey = toJSONKeyText (T.pack . showVersion)
+    toJSONKey = toJSONKeyKey (Key.fromString . showVersion)
 
 -------------------------------------------------------------------------------
 -- semigroups NonEmpty
@@ -1498,7 +1553,7 @@ instance (ToJSON a) => ToJSON (DList.DList a) where
     toJSON = toJSON1
     toEncoding = toEncoding1
 
-#if MIN_VERSION_dlist(1,0,0) && __GLASGOW_HASKELL__ >=800
+#if MIN_VERSION_dlist(1,0,0)
 -- | @since 1.5.3.0
 instance ToJSON1 DNE.DNonEmpty where
     liftToJSON t _ = listValue t . DNE.toList
@@ -1509,6 +1564,31 @@ instance (ToJSON a) => ToJSON (DNE.DNonEmpty a) where
     toJSON = toJSON1
     toEncoding = toEncoding1
 #endif
+
+-------------------------------------------------------------------------------
+-- OneTuple
+-------------------------------------------------------------------------------
+
+-- | @since 2.0.2.0
+instance ToJSON1 Solo where
+    liftToJSON t _ (Solo a) = t a
+    liftToJSONList _ tl xs = tl (map getSolo xs)
+
+    liftToEncoding t _ (Solo a) = t a
+    liftToEncodingList _ tl xs = tl (map getSolo xs)
+
+-- | @since 2.0.2.0
+instance (ToJSON a) => ToJSON (Solo a) where
+    toJSON = toJSON1
+    toJSONList = liftToJSONList toJSON toJSONList
+
+    toEncoding = toEncoding1
+    toEncodingList = liftToEncodingList toEncoding toEncodingList
+
+-- | @since 2.0.2.0
+instance (ToJSONKey a) => ToJSONKey (Solo a) where
+    toJSONKey = contramapToJSONKeyFunction getSolo toJSONKey
+    toJSONKeyList = contramapToJSONKeyFunction (map getSolo) toJSONKeyList
 
 -------------------------------------------------------------------------------
 -- transformers - Functors
@@ -1581,8 +1661,8 @@ instance (ToJSON1 f, ToJSON1 g, ToJSON a) => ToJSON (Product f g a) where
     toEncoding = toEncoding1
 
 instance (ToJSON1 f, ToJSON1 g) => ToJSON1 (Sum f g) where
-    liftToJSON tv tvl (InL x) = Object $ H.singleton "InL" (liftToJSON tv tvl x)
-    liftToJSON tv tvl (InR y) = Object $ H.singleton "InR" (liftToJSON tv tvl y)
+    liftToJSON tv tvl (InL x) = Object $ KM.singleton "InL" (liftToJSON tv tvl x)
+    liftToJSON tv tvl (InR y) = Object $ KM.singleton "InR" (liftToJSON tv tvl y)
 
     liftToEncoding te tel (InL x) = E.pairs $ E.pair "InL" $ liftToEncoding te tel x
     liftToEncoding te tel (InR y) = E.pairs $ E.pair "InR" $ liftToEncoding te tel y
@@ -1617,7 +1697,6 @@ instance ToJSON IntSet.IntSet where
     toJSON = toJSON . IntSet.toList
     toEncoding = toEncoding . IntSet.toList
 
-
 instance ToJSON1 IntMap.IntMap where
     liftToJSON t tol = liftToJSON to' tol' . IntMap.toList
       where
@@ -1636,7 +1715,7 @@ instance ToJSON a => ToJSON (IntMap.IntMap a) where
 
 instance ToJSONKey k => ToJSON1 (M.Map k) where
     liftToJSON g _ = case toJSONKey of
-        ToJSONKeyText f _ -> Object . mapHashKeyVal f g
+        ToJSONKeyText f _ -> Object . KM.fromMap . mapKeyValO f g
         ToJSONKeyValue  f _ -> Array . V.fromList . map (toJSONPair f g) . M.toList
 
     liftToEncoding g _ = case toJSONKey of
@@ -1681,7 +1760,7 @@ instance ToJSON UUID.UUID where
     toEncoding = E.unsafeToEncoding . EB.quote . B.byteString . UUID.toASCIIBytes
 
 instance ToJSONKey UUID.UUID where
-    toJSONKey = ToJSONKeyText UUID.toText $
+    toJSONKey = ToJSONKeyText (Key.fromText . UUID.toText) $
         E.unsafeToEncoding . EB.quote . B.byteString . UUID.toASCIIBytes
 
 -------------------------------------------------------------------------------
@@ -1735,10 +1814,11 @@ instance (ToJSON a) => ToJSON (HashSet.HashSet a) where
 
 instance ToJSONKey k => ToJSON1 (H.HashMap k) where
     liftToJSON g _ = case toJSONKey of
-        ToJSONKeyText f _ -> Object . mapKeyVal f g
-        ToJSONKeyValue f _ -> Array . V.fromList . map (toJSONPair f g) . H.toList
+        ToJSONKeyText f _ -> Object . KM.fromHashMap . mapKeyVal f g
+        ToJSONKeyValue f _
+          -> Array . V.fromList . map (toJSONPair f g) . H.toList
 
-    -- liftToEncoding :: forall a. (a -> Encoding) -> ([a] -> Encoding) -> H.HashMap k a -> Encoding
+    -- liftToEncoding :: forall a. (a -> Encoding) -> ([a] -> Encoding) -> KM.HashMap k a -> Encoding
     liftToEncoding g _ = case toJSONKey of
         ToJSONKeyText _ f -> dict f g H.foldrWithKey
         ToJSONKeyValue _ f -> listEncoding (pairEncoding f) . H.toList
@@ -1746,6 +1826,18 @@ instance ToJSONKey k => ToJSON1 (H.HashMap k) where
         pairEncoding f (a, b) = E.list id [f a, g b]
 
 instance (ToJSON v, ToJSONKey k) => ToJSON (H.HashMap k v) where
+    toJSON = toJSON1
+    toEncoding = toEncoding1
+
+-------------------------------------------------------------------------------
+-- Data.Aeson.KeyMap
+-------------------------------------------------------------------------------
+
+instance ToJSON1 KM.KeyMap where
+    liftToJSON g _ = Object . fmap g
+    liftToEncoding g _ = dict E.key g KM.foldrWithKey
+
+instance (ToJSON v) => ToJSON (KM.KeyMap v) where
     {-# SPECIALIZE instance ToJSON Object #-}
 
     toJSON = toJSON1
@@ -1754,6 +1846,13 @@ instance (ToJSON v, ToJSONKey k) => ToJSON (H.HashMap k v) where
 -------------------------------------------------------------------------------
 -- aeson
 -------------------------------------------------------------------------------
+
+instance ToJSON Key where
+    toJSON = toJSON . Key.toText
+    toEncoding = E.key
+
+instance ToJSONKey Key where
+    toJSONKey = ToJSONKeyText id E.key
 
 instance ToJSON Value where
     toJSON a = a
@@ -1916,6 +2015,8 @@ instance ToJSON QuarterOfYear where
     toJSON Q3 = "q3"
     toJSON Q4 = "q4"
 
+    toEncoding = toEncodingQuarterOfYear
+
 toEncodingQuarterOfYear :: QuarterOfYear -> E.Encoding' a
 toEncodingQuarterOfYear Q1 = E.unsafeToEncoding "\"q1\""
 toEncodingQuarterOfYear Q2 = E.unsafeToEncoding "\"q2\""
@@ -2000,6 +2101,7 @@ instance ToJSON a => ToJSON (Semigroup.WrappedMonoid a) where
     toEncoding = toEncoding1
 
 
+#if !MIN_VERSION_base(4,16,0)
 instance ToJSON1 Semigroup.Option where
     liftToJSON t to' = liftToJSON t to' . Semigroup.getOption
     liftToEncoding t to' = liftToEncoding t to' . Semigroup.getOption
@@ -2007,6 +2109,7 @@ instance ToJSON1 Semigroup.Option where
 instance ToJSON a => ToJSON (Semigroup.Option a) where
     toJSON = toJSON1
     toEncoding = toEncoding1
+#endif
 
 -------------------------------------------------------------------------------
 -- data-fix
@@ -2175,7 +2278,7 @@ instance (ToJSON a, ToJSON b, ToJSON c) => ToJSONKey (a,b,c)
 instance (ToJSON a, ToJSON b, ToJSON c, ToJSON d) => ToJSONKey (a,b,c,d)
 
 instance ToJSONKey Char where
-    toJSONKey = ToJSONKeyText T.singleton (E.string . (:[]))
+    toJSONKey = toJSONKeyText T.singleton
     toJSONKeyList = toJSONKeyText T.pack
 
 instance (ToJSONKey a, ToJSON a) => ToJSONKey [a] where
@@ -2662,12 +2765,12 @@ instance FromPairs Value (DList Pair) where
 -- ('Value' or 'Encoding'), and the result actually represents lists of pairs
 -- so it can be readily concatenated.
 class Monoid kv => KeyValuePair v kv where
-    pair :: String -> v -> kv
+    pair :: Key -> v -> kv
 
 instance (v ~ Value) => KeyValuePair v (DList Pair) where
-    pair k v = DList.singleton (pack k .= v)
+    pair k v = DList.singleton (k .= v)
     {-# INLINE pair #-}
 
 instance (e ~ Encoding) => KeyValuePair e Series where
-    pair = E.pairStr
+    pair = E.pair
     {-# INLINE pair #-}

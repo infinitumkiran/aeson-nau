@@ -18,7 +18,9 @@ import Data.Data
 import Data.Functor.Compose (Compose (..))
 import Data.Functor.Identity (Identity (..))
 import Data.Hashable (Hashable (..))
+#if !MIN_VERSION_base(4,16,0)
 import Data.Semigroup (Option)
+#endif
 import Data.Text
 import Data.Time (Day (..), fromGregorian)
 import GHC.Generics
@@ -44,6 +46,8 @@ data UFoo = UFoo {
       _UFooInt :: Int
     , uFooInt :: Int
     } deriving (Show, Eq, Data, Typeable)
+
+data NoConstructors
 
 data OneConstructor = OneConstructor
                       deriving (Show, Eq, Typeable, Data)
@@ -107,11 +111,14 @@ deriving instance Eq   (GADT a)
 deriving instance Show (GADT a)
 
 newtype MaybeField = MaybeField { maybeField :: Maybe Int }
+#if !MIN_VERSION_base(4,16,0)
 newtype OptionField = OptionField { optionField :: Option Int }
   deriving (Eq, Show)
+#endif
 
 deriving instance Generic Foo
 deriving instance Generic UFoo
+deriving instance Generic NoConstructors
 deriving instance Generic OneConstructor
 deriving instance Generic (Product2 a b)
 deriving instance Generic (Product6 a b c d e f)
@@ -120,7 +127,9 @@ deriving instance Generic (Approx a)
 deriving instance Generic Nullary
 deriving instance Generic (SomeType a)
 deriving instance Generic1 SomeType
+#if !MIN_VERSION_base(4,16,0)
 deriving instance Generic OptionField
+#endif
 deriving instance Generic EitherTextInt
 
 failure :: Show a => String -> String -> a -> Property
