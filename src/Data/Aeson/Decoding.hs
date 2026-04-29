@@ -17,7 +17,7 @@ module Data.Aeson.Decoding (
 ) where
 
 import           Control.Monad.Catch                 (MonadThrow (..))
-import           Data.Aeson.Types.Internal           (AesonException (..), formatError)
+import           Data.Aeson.Types.Internal           (AesonException (..), addFieldNameToErrorResp)
 
 import qualified Data.Aeson.Types                    as A
 import qualified Data.ByteString                     as BS
@@ -50,7 +50,7 @@ eitherDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) Left $ \v bs' -
     A.ISuccess x
         | bsSpace bs' -> Right x
         | otherwise   -> Left "Trailing garbage"
-    A.IError path msg -> Left $ formatError path msg
+    A.IError path msg -> Left $ addFieldNameToErrorResp path msg
 
 -- | Like 'decodeStrict' but throws an 'AesonException' when decoding fails.
 throwDecodeStrict :: forall a m. (A.FromJSON a, MonadThrow m) => BS.ByteString -> m a
@@ -58,7 +58,7 @@ throwDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) (throwM . AesonE
     A.ISuccess x
         | bsSpace bs' -> pure x
         | otherwise   -> throwM $ AesonException "Trailing garbage"
-    A.IError path msg -> throwM $ AesonException $ formatError path msg
+    A.IError path msg -> throwM $ AesonException $ addFieldNameToErrorResp path msg
 
 -------------------------------------------------------------------------------
 -- Decoding: lazy bytestring
@@ -80,7 +80,7 @@ eitherDecode bs = unResult (toResultValue (lbsToTokens bs)) Left $ \v bs' -> cas
     A.ISuccess x
         | lbsSpace bs' -> Right x
         | otherwise    -> Left "Trailing garbage"
-    A.IError path msg  -> Left $ formatError path msg
+    A.IError path msg  -> Left $ addFieldNameToErrorResp path msg
 
 -- | Like 'decode' but throws an 'AesonException' when decoding fails.
 --
@@ -90,7 +90,7 @@ throwDecode bs = unResult (toResultValue (lbsToTokens bs)) (throwM . AesonExcept
     A.ISuccess x
         | lbsSpace bs'  -> pure x
         | otherwise    -> throwM $ AesonException "Trailing garbage"
-    A.IError path msg  -> throwM $ AesonException $ formatError path msg
+    A.IError path msg  -> throwM $ AesonException $ addFieldNameToErrorResp path msg
 
 -------------------------------------------------------------------------------
 -- Decoding: strict text
@@ -116,7 +116,7 @@ eitherDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) Left $ \v
     A.ISuccess x
         | textSpace bs' -> Right x
         | otherwise     -> Left "Trailing garbage"
-    A.IError path msg   -> Left $ formatError path msg
+    A.IError path msg   -> Left $ addFieldNameToErrorResp path msg
 
 -- | Like 'decodeStrictText' but throws an 'AesonException' when decoding fails.
 --
@@ -126,4 +126,4 @@ throwDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) (throwM . 
     A.ISuccess x
         | textSpace bs' -> pure x
         | otherwise     -> throwM $ AesonException "Trailing garbage"
-    A.IError path msg   -> throwM $ AesonException $ formatError path msg
+    A.IError path msg   -> throwM $ AesonException $ addFieldNameToErrorResp path msg

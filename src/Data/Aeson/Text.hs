@@ -26,7 +26,7 @@ import Data.Aeson.Internal.Prelude
 import Data.Aeson.Types (Value(..), ToJSON(..))
 import Data.Aeson.Encoding (encodingToLazyByteString)
 import qualified Data.Aeson.KeyMap as KM
-import Data.Scientific (FPFormat(..), base10Exponent)
+import Data.Scientific (FPFormat(..), isInteger)
 import Data.Text.Lazy.Builder (Builder)
 import qualified Data.Text.Lazy.Builder as TB
 import Data.Text.Lazy.Builder.Scientific (formatScientificBuilder)
@@ -95,8 +95,4 @@ string s = TB.singleton '"' <> quote s <> TB.singleton '"'
         where h = showHex (fromEnum c) ""
 
 fromScientific :: Scientific -> Builder
-fromScientific s = formatScientificBuilder format prec s
-  where
-    (format, prec)
-      | base10Exponent s < 0 = (Generic, Nothing)
-      | otherwise            = (Fixed,   Just 0)
+fromScientific s = formatScientificBuilder Fixed (if isInteger s then Just 0 else Nothing) s

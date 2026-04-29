@@ -62,6 +62,7 @@ module Data.Aeson.Encoding.Internal
 
 import Data.Aeson.Internal.Prelude hiding (empty)
 
+import Numeric (showFFloat)
 import Data.Aeson.Types.Internal (Value, Key)
 import Data.ByteString.Builder (Builder, char7, toLazyByteString)
 import Data.ByteString.Short (ShortByteString)
@@ -315,7 +316,7 @@ integer :: Integer -> Encoding
 integer = Encoding . B.integerDec
 
 float :: Float -> Encoding
-float = realFloatToEncoding $ Encoding . B.floatDec
+float = realFloatToEncoding $ Encoding . realDec
 
 -- |
 --
@@ -332,7 +333,13 @@ float = realFloatToEncoding $ Encoding . B.floatDec
 -- "\"-inf\""
 --
 double :: Double -> Encoding
-double = realFloatToEncoding $ Encoding . B.doubleDec
+double = realFloatToEncoding $ Encoding . realDec
+
+realDec :: RealFloat a => a -> Builder
+realDec d = B.string7 (showFFloat p d "")
+  where
+    p | d == fromInteger (round d) = Just 0
+      | otherwise                  = Nothing
 
 scientific :: Scientific -> Encoding
 scientific = Encoding . EB.scientific

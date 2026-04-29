@@ -2,7 +2,10 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskellQuotes #-}
 
@@ -34,6 +37,8 @@ module Data.Aeson.Types.Internal
     , IResult(..)
     , JSONPathElement(..)
     , JSONPath
+    , ErrorResp(..)
+    , ErrorType(..)
     , iparse
     , iparseEither
     , parse
@@ -48,6 +53,14 @@ module Data.Aeson.Types.Internal
     , formatPath
     , formatRelativePath
     , (<?>)
+    , getFieldName
+    , getErrorObject
+    , defaultErrorObject
+    , addFieldNameToErrorResp
+    , addObjectType
+    , addMessage
+    , typeMismatchErr
+    , missingFieldErr
     -- * Constructors and accessors
     , object
 
@@ -97,6 +110,9 @@ import qualified Control.Monad as Monad
 import qualified Control.Monad.Fail as Fail
 import qualified Data.Vector as V
 import qualified Language.Haskell.TH.Syntax as TH
+import Text.Read (readMaybe)
+import Text.JSON hiding (Error, Result)
+import qualified Text.JSON
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Scientific as Sci
@@ -112,13 +128,103 @@ data JSONPathElement = Key Key
                      | Index {-# UNPACK #-} !Int
                        -- ^ JSON path element of an index into an
                        -- array, \"array[index]\".
-                       deriving (Eq, Show, Typeable, Ord)
+                       deriving (Eq, Show, Typeable, Ord, Read)
 type JSONPath = [JSONPathElement]
 
 -- | The internal result of running a 'Parser'.
 data IResult a = IError JSONPath String
                | ISuccess a
                deriving (Eq, Show, Typeable)
+
+data ErrorResp = ErrorResp
+    { errorType     :: ErrorType
+    , errField      :: Maybe String
+    , objectType    :: Maybe String
+    , errMessage    :: Maybe String
+    , expectedValue :: Maybe String
+    , actualValue   :: Maybe String
+    , jPath         :: Maybe JSONPath
+    } deriving (Eq, Typeable)
+
+data ErrorType = MISSING_FIELD | TYPE_MISMATCH | GENERAL
+    deriving (Eq, Typeable)
+
+maybeFromObj :: JSON a => String -> JSObject JSValue -> Text.JSON.Result (Maybe a)
+maybeFromObj key obj = case lookupObj key obj of
+    Just JSNull -> Ok Nothing
+    Just val    -> Just <$> readJSON val
+    Nothing     -> Ok Nothing
+
+lookupObj :: String -> JSObject JSValue -> Maybe JSValue
+lookupObj k obj = lookup k (fromJSObject obj)
+
+instance JSON ErrorType where
+    readJSON (JSString s) = case fromJSString s of
+        "MISSING_FIELD" -> Ok MISSING_FIELD
+        "TYPE_MISMATCH" -> Ok TYPE_MISMATCH
+        "GENERAL"       -> Ok GENERAL
+        x               -> Text.JSON.Error $ "Invalid ErrorType: " ++ x
+    readJSON x = Text.JSON.Error $ "Expected String for ErrorType, got: " ++ show x
+
+    showJSON = JSString . toJSString . \case
+        MISSING_FIELD -> "MISSING_FIELD"
+        TYPE_MISMATCH -> "TYPE_MISMATCH"
+        GENERAL       -> "GENERAL"
+
+instance JSON JSONPathElement where
+    readJSON (JSObject obj) = do
+        typ <- Text.JSON.valFromObj "type" obj
+        case (typ :: String) of
+            "key"   -> do
+                val <- Text.JSON.valFromObj "value" obj
+                return $ Key (Key.fromString val)
+            "index" -> do
+                val <- Text.JSON.valFromObj "value" obj
+                return $ Index val
+            _       -> Text.JSON.Error $ "Invalid JSONPathElement type: " ++ typ
+    readJSON x = Text.JSON.Error $ "Expected Object for JSONPathElement, got: " ++ show x
+
+    showJSON (Key k) = makeObj
+        [ ("type",  showJSON ("key" :: String))
+        , ("value", showJSON $ Key.toString k)
+        ]
+    showJSON (Index i) = makeObj
+        [ ("type",  showJSON ("index" :: String))
+        , ("value", showJSON i)
+        ]
+
+instance JSON ErrorResp where
+    readJSON (JSObject obj) = do
+        errorType     <- Text.JSON.valFromObj "errorType" obj
+        errField      <- maybeFromObj "errField" obj
+        objectType    <- maybeFromObj "objectType" obj
+        errMessage    <- maybeFromObj "errMessage" obj
+        expectedValue <- maybeFromObj "expectedValue" obj
+        actualValue   <- maybeFromObj "actualValue" obj
+        jPath         <- case lookupObj "jPath" obj of
+            Just JSNull -> return Nothing
+            Just arr    -> Just <$> readJSON arr
+            Nothing     -> return Nothing
+        return ErrorResp{..}
+    readJSON x = Text.JSON.Error $ "Expected Object for ErrorResp, got: " ++ show x
+
+    showJSON ErrorResp{..} = makeObj
+        [ ("errorType",     showJSON errorType)
+        , ("errField",      maybe JSNull showJSON errField)
+        , ("objectType",    maybe JSNull showJSON objectType)
+        , ("errMessage",    maybe JSNull showJSON errMessage)
+        , ("expectedValue", maybe JSNull showJSON expectedValue)
+        , ("actualValue",   maybe JSNull showJSON actualValue)
+        , ("jPath",         maybe JSNull showJSON jPath)
+        ]
+
+instance Show ErrorResp where
+    show = encode
+
+instance Read ErrorResp where
+    readsPrec _ input = case decode input of
+        Ok val            -> [(val, "")]
+        Text.JSON.Error _ -> []
 
 -- | The result of running a 'Parser'.
 data Result a = Error String
@@ -564,7 +670,7 @@ emptyObject = Object KM.empty
 
 -- | Run a 'Parser'.
 parse :: (a -> Parser b) -> a -> Result b
-parse m v = runParser (m v) [] (const Error) Success
+parse m v = runParser (m v) [] (const Data.Aeson.Types.Internal.Error) Success
 {-# INLINE parse #-}
 
 -- | Run a 'Parser'.
@@ -581,7 +687,7 @@ parseMaybe m v = runParser (m v) [] (\_ _ -> Nothing) Just
 -- the 'Left' payload will contain an error message.
 parseEither :: (a -> Parser b) -> a -> Either String b
 parseEither m v = runParser (m v) [] onError Right
-  where onError path msg = Left (formatError path msg)
+  where onError path msg = Left (addFieldNameToErrorResp path msg)
 {-# INLINE parseEither #-}
 
 -- | Run a 'Parser' with an 'Either' result type.
@@ -629,6 +735,80 @@ formatRelativePath path = format "" path
     escapeChar '\'' = "\\'"
     escapeChar '\\' = "\\\\"
     escapeChar c    = [c]
+
+getFieldName :: JSONPath -> Maybe String
+getFieldName path = format $ reverse path
+  where
+    format :: JSONPath -> Maybe String
+    format []                = Nothing
+    format (Index _:parts)   = format parts
+    format (Key key:_)       = Just $ formatKey key
+
+    formatKey :: Key -> String
+    formatKey key
+        | isIdentifierKey strKey = strKey
+        | otherwise              = escapeKey strKey
+      where strKey = Key.toString key
+
+    isIdentifierKey :: String -> Bool
+    isIdentifierKey []     = False
+    isIdentifierKey (x:xs) = isAlpha x && all isAlphaNum xs
+
+    escapeKey :: String -> String
+    escapeKey = concatMap escapeChar
+
+    escapeChar :: Char -> String
+    escapeChar '\'' = "\\'"
+    escapeChar '\\' = "\\\\"
+    escapeChar c    = [c]
+
+getErrorObject :: ErrorType -> Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe JSONPath -> ErrorResp
+getErrorObject errorType errField objectType errMessage expectedValue actualValue jPath = ErrorResp {..}
+
+defaultErrorObject :: ErrorResp
+defaultErrorObject = ErrorResp GENERAL Nothing Nothing Nothing Nothing Nothing Nothing
+
+addFieldNameToErrorResp :: JSONPath -> String -> String
+addFieldNameToErrorResp path err =
+    case (readMaybe err :: Maybe ErrorResp) of
+        Just err' -> show $ err' { errField = maybe (getFieldName path) Just $ errField err'
+                                 , jPath    = Just path
+                                 }
+        Nothing   -> err
+
+addObjectType :: String -> Parser a -> Parser a
+addObjectType oType (Parser p) = Parser $ \path kf ks ->
+    p path (\p' m -> kf p' (addObject m oType)) ks
+  where
+    addObject err obj =
+        case (readMaybe err :: Maybe ErrorResp) of
+            Just err' -> show $ err' { objectType = Just obj }
+            Nothing   -> err
+
+addMessage :: String -> Parser a -> Parser a
+addMessage mess (Parser p) = Parser $ \path kf ks ->
+    p path (\p' m -> kf p' (go m mess)) ks
+  where
+    go :: String -> String -> String
+    go err m =
+        case (readMaybe err :: Maybe ErrorResp) of
+            Just err' -> show $ err' { errMessage = Just $ maybe m (\val -> val ++ "," ++ m) $ errMessage err' }
+            Nothing   -> err
+
+typeMismatchErr :: Maybe String -> String -> String -> String
+typeMismatchErr objectType expected actual = show $
+    defaultErrorObject { errorType     = TYPE_MISMATCH
+                       , expectedValue = Just expected
+                       , actualValue   = Just actual
+                       , objectType    = objectType
+                       }
+
+missingFieldErr :: Maybe String -> String -> String
+missingFieldErr objectType field = show $
+    defaultErrorObject { errorType  = MISSING_FIELD
+                       , errField   = Just field
+                       , objectType = objectType
+                       }
 
 -- | A key\/value pair for an 'Object'.
 type Pair = (Key, Value)

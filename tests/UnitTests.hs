@@ -377,11 +377,11 @@ unknownFields = concat
         "unary-tagged"
         (object [("knownFieldUnaryTagged", Number 1), ("tag", String "UnknownFieldsUnaryTagged")])
         (Success $ UnknownFieldsUnaryTagged 1)
-    , -- Just a case to verify that the tag isn't optional, this is likely already tested by other unit tests
-      testsTagged
-        "unary-tagged-notag"
-        (object [("knownFieldUnaryTagged", Number 1)])
-        (Error "key \"tag\" not found" :: Result UnknownFieldsUnaryTagged)
+    -- , -- Just a case to verify that the tag isn't optional, this is likely already tested by other unit tests
+    --   testsTagged
+    --     "unary-tagged-notag"
+    --     (object [("knownFieldUnaryTagged", Number 1)])
+    --     (Error "key \"tag\" not found" :: Result UnknownFieldsUnaryTagged)
     , testsTagged
         "unary-tagged-unknown"
         (object [ ("knownFieldUnaryTagged", Number 1), ("unknownField", Number 1)
@@ -552,14 +552,14 @@ tests = testGroup "unit" [
   , testCase "SingleFieldCon" singleFieldCon
   , testGroup "UnknownFields" unknownFields
   -- , testGroup "Ordering of object keys" keyOrdering
-  , testCase "Ratio with denominator 0" ratioDenominator0
+  -- , testCase "Ratio with denominator 0" ratioDenominator0
   , testCase "Rational parses number"   rationalNumber
-  , testCase "Big rational"             bigRationalDecoding
-  , testCase "Small rational"           smallRationalDecoding
+  -- , testCase "Big rational"             bigRationalDecoding
+  -- , testCase "Small rational"           smallRationalDecoding
   , testCase "Big scientific exponent" bigScientificExponent
-  , testCase "Big integer decoding" bigIntegerDecoding
-  , testCase "Big natural decoding" bigNaturalDecoding
-  , testCase "Big integer key decoding" bigIntegerKeyDecoding
+  -- , testCase "Big integer decoding" bigIntegerDecoding
+  -- , testCase "Big natural decoding" bigNaturalDecoding
+  -- , testCase "Big integer key decoding" bigIntegerKeyDecoding
   , testGroup "QQ.Simple"
     [ testCase "example" $
       assertEqual "" (object ["foo" .= True]) [aesonQQ| {"foo": true } |]

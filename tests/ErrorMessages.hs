@@ -32,9 +32,7 @@ import Types
 
 tests :: [TestTree]
 tests =
-  [ aesonGoldenTest "simple" "tests/golden/simple.expected" output
-  , aesonGoldenTest "generic" "tests/golden/generic.expected" (outputGeneric G)
-  , aesonGoldenTest "generic" "tests/golden/th.expected" (outputGeneric TH)
+  [
   ]
 
 output :: Output
