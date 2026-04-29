@@ -67,6 +67,8 @@ module Data.Aeson
     , throwDecodeStrict'
     -- * Core JSON types
     , Value(..)
+    , ErrorResp(..)
+    , ErrorType(..)
     , Encoding
     , fromEncoding
     , Array
@@ -83,6 +85,7 @@ module Data.Aeson
     , KeyValueOmit(..)
     , (<?>)
     , JSONPath
+    , getFieldName
     -- ** Keys for maps
     , ToJSONKey(..)
     , ToJSONKeyFunction(..)
@@ -172,6 +175,7 @@ import Control.Monad.Catch (MonadThrow (..))
 import Data.Aeson.Types.FromJSON (parseIndexedJSON)
 import Data.Aeson.Encoding (encodingToLazyByteString)
 import Data.Aeson.Types
+import Data.Aeson.Types.Internal (ErrorResp(..), ErrorType(..), getFieldName)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import Data.Aeson.Decoding (decode, eitherDecode, throwDecode, decodeStrict, eitherDecodeStrict, throwDecodeStrict)

@@ -1,10 +1,12 @@
+packages:
+  .
+  attoparsec-iso8601
+  attoparsec-aeson
+  text-iso8601
+  examples
+  benchmarks
+
 with-compiler: ghc
-packages: .
-packages: attoparsec-iso8601
-packages: attoparsec-aeson
-packages: text-iso8601
-packages: examples
-packages: benchmarks
 tests: true
 benchmarks: true
 
