@@ -61,6 +61,7 @@ module Data.Aeson.Types.Internal
     , addMessage
     , typeMismatchErr
     , missingFieldErr
+    , wrapTokenizerError
     -- * Constructors and accessors
     , object
 
@@ -809,6 +810,14 @@ missingFieldErr objectType field = show $
                        , errField   = Just field
                        , objectType = objectType
                        }
+
+-- | Wrap a tokenizer error in ErrorResp format.
+-- This ensures all errors are consistently formatted as JSON.
+wrapTokenizerError :: String -> String
+wrapTokenizerError err =
+    case (readMaybe err :: Maybe ErrorResp) of
+        Just _  -> err  -- Already in ErrorResp format
+        Nothing -> show $ defaultErrorObject { errMessage = Just err }
 
 -- | A key\/value pair for an 'Object'.
 type Pair = (Key, Value)

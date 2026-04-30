@@ -17,7 +17,7 @@ module Data.Aeson.Decoding (
 ) where
 
 import           Control.Monad.Catch                 (MonadThrow (..))
-import           Data.Aeson.Types.Internal           (AesonException (..), addFieldNameToErrorResp)
+import           Data.Aeson.Types.Internal           (AesonException (..), addFieldNameToErrorResp, wrapTokenizerError)
 
 import qualified Data.Aeson.Types                    as A
 import qualified Data.ByteString                     as BS
@@ -46,7 +46,7 @@ decodeStrict bs = unResult (toResultValue (bsToTokens bs)) (\_ -> Nothing) $ \v 
 
 -- | Like 'decodeStrict' but returns an error message when decoding fails.
 eitherDecodeStrict :: (A.FromJSON a) => BS.ByteString -> Either String a
-eitherDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) Left $ \v bs' -> case A.ifromJSON v of
+eitherDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) (Left . wrapTokenizerError) $ \v bs' -> case A.ifromJSON v of
     A.ISuccess x
         | bsSpace bs' -> Right x
         | otherwise   -> Left "Trailing garbage"
@@ -54,7 +54,7 @@ eitherDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) Left $ \v bs' -
 
 -- | Like 'decodeStrict' but throws an 'AesonException' when decoding fails.
 throwDecodeStrict :: forall a m. (A.FromJSON a, MonadThrow m) => BS.ByteString -> m a
-throwDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) (throwM . AesonException) $ \v bs' -> case A.ifromJSON v of
+throwDecodeStrict bs = unResult (toResultValue (bsToTokens bs)) (throwM . AesonException . wrapTokenizerError) $ \v bs' -> case A.ifromJSON v of
     A.ISuccess x
         | bsSpace bs' -> pure x
         | otherwise   -> throwM $ AesonException "Trailing garbage"
@@ -76,7 +76,7 @@ decode bs = unResult (toResultValue (lbsToTokens bs)) (\_ -> Nothing) $ \v bs' -
 
 -- | Like 'decode' but returns an error message when decoding fails.
 eitherDecode :: (A.FromJSON a) => LBS.ByteString -> Either String a
-eitherDecode bs = unResult (toResultValue (lbsToTokens bs)) Left $ \v bs' -> case A.ifromJSON v of
+eitherDecode bs = unResult (toResultValue (lbsToTokens bs)) (Left . wrapTokenizerError) $ \v bs' -> case A.ifromJSON v of
     A.ISuccess x
         | lbsSpace bs' -> Right x
         | otherwise    -> Left "Trailing garbage"
@@ -86,7 +86,7 @@ eitherDecode bs = unResult (toResultValue (lbsToTokens bs)) Left $ \v bs' -> cas
 --
 -- 'throwDecode' is in @aeson@ since 2.1.2.0, but this variant is added later.
 throwDecode :: forall a m. (A.FromJSON a, MonadThrow m) => LBS.ByteString -> m a
-throwDecode bs = unResult (toResultValue (lbsToTokens bs)) (throwM . AesonException) $ \v bs' -> case A.ifromJSON v of
+throwDecode bs = unResult (toResultValue (lbsToTokens bs)) (throwM . AesonException . wrapTokenizerError) $ \v bs' -> case A.ifromJSON v of
     A.ISuccess x
         | lbsSpace bs'  -> pure x
         | otherwise    -> throwM $ AesonException "Trailing garbage"
@@ -112,7 +112,7 @@ decodeStrictText bs = unResult (toResultValue (textToTokens bs)) (\_ -> Nothing)
 --
 -- @since 2.2.1.0
 eitherDecodeStrictText :: (A.FromJSON a) => T.Text -> Either String a
-eitherDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) Left $ \v bs' -> case A.ifromJSON v of
+eitherDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) (Left . wrapTokenizerError) $ \v bs' -> case A.ifromJSON v of
     A.ISuccess x
         | textSpace bs' -> Right x
         | otherwise     -> Left "Trailing garbage"
@@ -122,7 +122,7 @@ eitherDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) Left $ \v
 --
 -- @since 2.2.1.0
 throwDecodeStrictText :: forall a m. (A.FromJSON a, MonadThrow m) => T.Text -> m a
-throwDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) (throwM . AesonException) $ \v bs' -> case A.ifromJSON v of
+throwDecodeStrictText bs = unResult (toResultValue (textToTokens bs)) (throwM . AesonException . wrapTokenizerError) $ \v bs' -> case A.ifromJSON v of
     A.ISuccess x
         | textSpace bs' -> pure x
         | otherwise     -> throwM $ AesonException "Trailing garbage"

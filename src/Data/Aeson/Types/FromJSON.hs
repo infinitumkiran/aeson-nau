@@ -823,7 +823,7 @@ withEmbeddedJSON _ innerParser (String txt) =
     where
         -- TODO: decode from strict text
         eitherDecode :: (FromJSON a) => L.ByteString -> Either String a
-        eitherDecode bs = unResult (toResultValue (lbsToTokens bs)) Left $ \v bs' -> case ifromJSON v of
+        eitherDecode bs = unResult (toResultValue (lbsToTokens bs)) (Left . wrapTokenizerError) $ \v bs' -> case ifromJSON v of
             ISuccess x
                 | lbsSpace bs' -> Right x
                 | otherwise    -> Left "Trailing garbage"
