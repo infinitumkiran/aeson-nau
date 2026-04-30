@@ -47,6 +47,7 @@ module Data.Aeson.Parser.Internal
 import Control.Applicative ((<|>))
 import Control.Monad (when, void)
 import Data.Attoparsec.ByteString.Char8 (Parser, char, decimal, endOfInput, isDigit_w8, signed, string)
+import Data.Bits (testBit)
 import Data.Function (fix)
 import Data.Functor (($>))
 import Data.Integer.Conversion (byteStringToInteger)
@@ -63,17 +64,14 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Attoparsec.ByteString as A
 import qualified Data.Attoparsec.Lazy as L
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Builder as B
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy as L
-import qualified Data.ByteString.Lazy.Char8 as C
 import qualified Data.ByteString.Unsafe as B
 import qualified Data.Scientific as Sci
+import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as Vector (empty, fromList, fromListN, reverse)
 import qualified Data.Word8.Patterns as W8
 
 import Data.Aeson.Types (IResult(..), JSONPath, Object, Result(..), Value(..), Key)
-import Data.Aeson.Internal.Text
 import Data.Aeson.Decoding (unescapeText)
 
 -- $setup
@@ -322,12 +320,12 @@ key = Key.fromText <$> jstring
 jstring_ :: Parser Text
 {-# INLINE jstring_ #-}
 jstring_ = do
-  s <- A.takeWhile (\w -> w /= W8.DOUBLE_QUOTE && w /= W8.BACKSLASH && w >= 0x20 && w < 0x80)
-  mw <- A.peekWord8
-  case mw of
+  s <- A.takeWhile (\w -> w /= W8.DOUBLE_QUOTE && w /= W8.BACKSLASH && not (testBit w 7))
+  let txt = TE.decodeLatin1 s
+  w <- A.peekWord8
+  case w of
     Nothing              -> fail "string without end"
-    Just W8.DOUBLE_QUOTE -> A.anyWord8 $> unsafeDecodeASCII s
-    Just w | w < 0x20    -> fail "unescaped control character"
+    Just W8.DOUBLE_QUOTE -> A.anyWord8 $> txt
     _                    -> jstringSlow s
 
 jstringSlow :: B.ByteString -> Parser Text
@@ -369,34 +367,13 @@ eitherDecodeWith p to s =
       L.Done _ v     -> case to v of
                           ISuccess a      -> Right a
                           IError path msg -> Left (path, msg)
-      L.Fail notparsed ctx msg -> Left ([], buildMsg notparsed ctx msg)
+      L.Fail _ ctx msg -> Left ([], buildMsg ctx msg)
   where
-    buildMsg :: L.ByteString -> [String] -> String -> String
-    buildMsg notYetParsed [] msg = msg ++ formatErrorLine notYetParsed
-    buildMsg notYetParsed (expectation:_) msg =
-      msg ++ ". Expecting " ++ expectation ++ formatErrorLine notYetParsed
+    buildMsg :: [String] -> String -> String
+    buildMsg [] msg = msg
+    buildMsg (expectation:_) msg =
+      msg ++ ". Expecting " ++ expectation
 {-# INLINE eitherDecodeWith #-}
-
--- | Grab the first 100 bytes from the non parsed portion and
--- format to get nicer error messages
-formatErrorLine :: L.ByteString -> String
-formatErrorLine bs =
-  C.unpack .
-  -- if formatting results in empty ByteString just return that
-  -- otherwise construct the error message with the bytestring builder
-  (\bs' ->
-     if BSL.null bs'
-       then BSL.empty
-       else
-         B.toLazyByteString $
-         B.stringUtf8 " at '" <> B.lazyByteString bs' <> B.stringUtf8 "'"
-  ) .
-  -- if newline is present cut at that position
-  BSL.takeWhile (10 /=) .
-  -- remove spaces, CR's, tabs, backslashes and quotes characters
-  BSL.filter (`notElem` [9, 13, 32, 34, 47, 92]) .
-  -- take 100 bytes
-  BSL.take 100 $ bs
 
 eitherDecodeStrictWith :: Parser Value -> (Value -> IResult a) -> B.ByteString
                        -> Either (JSONPath, String) a
