@@ -61,11 +61,20 @@ main = defaultMain $ testGroup "text-iso8601"
         -- accepts +23:59
         , accepts T.parseUTCTime "1937-01-01T12:00:00+23:59"
         , accepts T.parseUTCTime "1937-01-01T12:00:00-23:59"
+
+        -- FORK DIVERGENCE from upstream https://github.com/haskell/aeson/issues/1033:
+        -- we accept a single space before the zone designator, as aeson < 2.2
+        -- (attoparsec-iso8601) did. Upstream rejects these.
+        , accepts T.parseUTCTime "2023-06-09T02:35:33 Z"
+        , accepts T.parseUTCTime "2023-06-09 02:35:33 Z"
+        , accepts T.parseUTCTime "2023-06-09 02:35:33 +05:30"
+        , accepts T.parseZonedTime "2023-06-09 02:35:33 Z"
         ]
 
     , testGroup "rejected"
-        -- https://github.com/haskell/aeson/issues/1033
-        [ rejects T.parseUTCTime "2023-06-09T02:35:33 Z"
+        -- only *one* space is skipped, and it must be followed by a zone
+        [ rejects T.parseUTCTime "2023-06-09T02:35:33  Z"
+        , rejects T.parseUTCTime "2023-06-09T02:35:33 "
 
         -- Y2K years
         , rejects T.parseDay "99-12-12"

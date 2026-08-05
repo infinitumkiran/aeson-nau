@@ -66,6 +66,16 @@ utcTimeGood = do
   t14 <- parseWithAeson ts14
   assertEqual "utctime" (parseWithRead "%FT%T%QZ" "2015-08-23T23:59:60.999999999999Z") t14
 
+  -- FORK DIVERGENCE from upstream https://github.com/haskell/aeson/issues/1033:
+  -- a single space before the zone designator is accepted, as it was in
+  -- aeson < 2.2 (attoparsec-iso8601). Upstream rejects both of these.
+  let ts15 = "2015-01-03 12:13:00 Z"
+  t15 <- parseWithAeson ts15
+  assertEqual "utctime" (parseWithRead "%F %T%QZ" "2015-01-03 12:13:00Z") t15
+  let ts16 = "2015-01-03 12:13:00 +00:00"
+  t16 <- parseWithAeson ts16
+  assertEqual "utctime" (parseWithRead "%F %T%QZ" "2015-01-03 12:13:00Z") t16
+
   where
     parseWithRead :: String -> LT.Text -> UTCTime
     parseWithRead f s =
@@ -87,8 +97,10 @@ utcTimeBad info = do
   verifyFailParse "2015-01-03 12:13:00.Z" -- decimal at the end but no digits
   verifyFailParse "2015-01-03 12:13.000Z" -- decimal at the end, but no seconds
   verifyFailParse "2015-01-03 23:59:61Z"  -- exceeds allowed seconds per day
-  verifyFailParse "2015-01-03 12:13:00 Z" -- space before Zulu
-  verifyFailParse "2015-01-03 12:13:00 +00:00" -- space before offset
+  -- NB: a *single* space before the zone designator is accepted by this fork
+  -- (see utcTimeGood); only one is skipped, and it must be followed by a zone.
+  verifyFailParse "2015-01-03 12:13:00  Z" -- two spaces before Zulu
+  verifyFailParse "2015-01-03 12:13:00 "  -- space, then nothing
   where
     verifyFailParse :: LT.Text -> Assertion
     verifyFailParse s = do

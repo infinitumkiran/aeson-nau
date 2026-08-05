@@ -531,7 +531,13 @@ parseZT
     :: (Local.ZonedTime -> Either String r)
     -> Local.LocalTime
     -> Char -> Text -> Either String r
-parseZT kont lt = parseTimeZone__ lt $ \lt' tz -> inline kont (Local.ZonedTime lt' tz)
+-- Lenient: accept a single space between the time and the zone designator,
+-- e.g. "2026-08-05 10:42:06 Z", as aeson < 2.2 (attoparsec-iso8601) did.
+parseZT kont lt c t
+    | c == ' '  = unconsAscii (unexpectedEOF "timezone: Z, +HH:MM or -HH:MM") go t
+    | otherwise = go c t
+  where
+    go = parseTimeZone__ lt $ \lt' tz -> inline kont (Local.ZonedTime lt' tz)
 
 {-# INLINE skipColon #-}
 skipColon
